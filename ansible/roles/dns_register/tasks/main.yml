@@ -1,0 +1,98 @@
+---
+# DNS Registration Role for RHEL 8.4 Servers in GCP
+
+- name: Install required packages for DNS registration
+  dnf:
+    name: bind-utils
+    state: present
+  tags: [packages]
+
+- name: Set DNS registration variables
+  set_fact:
+    hostname: "{{ ansible_hostname }}"
+    fqdn: "{{ ansible_hostname }}.{{ dns_domain }}"
+    ip_address: "{{ ansible_default_ipv4.address }}"
+    reverse_ip: "{{ ansible_default_ipv4.address.split('.')[::-1] | join('.') }}"
+    reverse_zone: "{{ ansible_default_ipv4.address.split('.')[0:3][::-1] | join('.') }}.in-addr.arpa"
+  tags: [setup]
+
+- name: Show DNS info
+  debug:
+    msg: |
+      DNS Registration for {{ fqdn }}
+      IP Address: {{ ip_address }}
+      Reverse Zone: {{ reverse_zone }}
+  tags: [debug]
+
+- name: Generate TSIG key if it doesn't exist
+  block:
+    - name: Create TSIG key for secure DNS updates
+      command: >
+        dnssec-keygen -a HMAC-SHA256 -b 256 -n HOST -r /dev/urandom {{ dns_domain }}
+      args:
+        creates: "/root/K{{ dns_domain }}*"
+        chdir: /root
+      register: key_gen
+      
+    - name: Extract key value
+      shell: grep -v '^;' "/root/K{{ dns_domain }}*.key" | cut -d ' ' -f 7-
+      register: key_value
+      changed_when: false
+      when: key_gen.changed
+      
+    - name: Create key file
+      template:
+        src: templates/nsupdate.key.j2
+        dest: "{{ dns_key_file }}"
+        owner: root
+        group: root
+        mode: '0600'
+      vars:
+        key_content: "{{ key_value.stdout }}"
+      when: key_gen.changed
+  when: not ansible_check_mode
+  tags: [keys]
+
+- name: Create nsupdate commands file
+  template:
+    src: templates/nsupdate_commands.j2
+    dest: /tmp/nsupdate_commands.txt
+    owner: root
+    group: root
+    mode: '0600'
+  tags: [dns]
+
+- name: Execute nsupdate to register DNS
+  command: nsupdate -v -k {{ dns_key_file }} /tmp/nsupdate_commands.txt
+  register: nsupdate_result
+  changed_when: nsupdate_result.rc == 0
+  failed_when: nsupdate_result.rc != 0 and 'not found' not in nsupdate_result.stderr
+  tags: [dns]
+
+- name: Remove temporary nsupdate commands file
+  file:
+    path: /tmp/nsupdate_commands.txt
+    state: absent
+  tags: [cleanup]
+
+- name: Verify forward DNS registration
+  command: dig @{{ dns_server }} {{ fqdn }} A +short
+  register: dig_forward
+  changed_when: false
+  ignore_errors: yes
+  tags: [verify]
+
+- name: Verify reverse DNS registration
+  command: dig @{{ dns_server }} -x {{ ip_address }} +short
+  register: dig_reverse
+  changed_when: false
+  ignore_errors: yes
+  tags: [verify]
+
+- name: DNS registration status
+  debug:
+    msg: |
+      DNS Registration status:
+      Forward record ({{ fqdn }} -> {{ ip_address }}): {{ 'OK' if dig_forward.stdout | trim == ip_address else 'FAILED or PENDING' }}
+      Reverse record ({{ ip_address }} -> {{ fqdn }}): {{ 'OK' if dig_reverse.stdout | trim == fqdn + '.' else 'FAILED or PENDING' }}
+  tags: [status]

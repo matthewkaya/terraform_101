@@ -1,0 +1,88 @@
+---
+# LDAP Authentication Role for RHEL 8.4 Servers in GCP
+
+- name: Update system packages
+  dnf:
+    name: "*"
+    state: latest
+    update_cache: yes
+  tags: [packages]
+
+- name: Install required LDAP authentication packages
+  dnf:
+    name:
+      - sssd
+      - sssd-ldap
+      - authselect
+      - openldap-clients
+      - oddjob-mkhomedir
+    state: present
+  tags: [packages]
+
+- name: Backup existing SSSD configuration if it exists
+  copy:
+    src: /etc/sssd/sssd.conf
+    dest: "/etc/sssd/sssd.conf.bak.{{ ansible_date_time.iso8601 }}"
+    remote_src: yes
+  when: ansible_stat.exists is defined and ansible_stat.exists
+  register: sssd_backup
+  ignore_errors: yes
+  tags: [config]
+
+- name: Configure SSSD for LDAP authentication
+  template:
+    src: templates/sssd.conf.j2
+    dest: /etc/sssd/sssd.conf
+    owner: root
+    group: root
+    mode: '0600'
+  register: sssd_config
+  tags: [config]
+
+- name: Configure authselect profile
+  command: authselect select sssd with-mkhomedir --force
+  tags: [config]
+
+- name: Enable and restart SSSD service
+  systemd:
+    name: sssd
+    state: restarted
+    enabled: yes
+  when: sssd_config.changed
+  tags: [service]
+
+- name: Test LDAP connection
+  command: >
+    ldapsearch -H ldaps://{{ ldap_server }}:{{ ldap_ssl_port }} 
+    -D "{{ ldap_bind_dn }}" -w "{{ ldap_bind_password }}" 
+    -b "{{ ldap_base_dn }}" -s sub "(objectClass=*)" dn
+  register: ldap_test
+  changed_when: false
+  ignore_errors: yes
+  no_log: true  # Don't log this output as it might contain sensitive information
+  tags: [test]
+
+- name: Configure firewall for LDAP
+  firewalld:
+    service: "{{ item }}"
+    permanent: yes
+    state: enabled
+  with_items:
+    - ldap
+    - ldaps
+  register: firewall_config
+  ignore_errors: yes  # Continue if firewalld is not available
+  tags: [firewall]
+
+- name: Reload firewall if changed
+  systemd:
+    name: firewalld
+    state: reloaded
+  when: firewall_config.changed
+  ignore_errors: yes  # Continue if firewalld is not available
+  tags: [firewall]
+
+- name: LDAP authentication setup status
+  debug:
+    msg: "LDAP Authentication setup {{ 'successful' if ldap_test.rc == 0 else 'failed - check configuration and connectivity' }}"
+  tags: [status]

@@ -1,0 +1,169 @@
+---
+# Active Directory Group Management Role for RHEL 8.4 Servers in GCP
+
+- name: Install required packages for AD integration
+  dnf:
+    name:
+      - realmd
+      - sssd
+      - sssd-tools
+      - oddjob
+      - oddjob-mkhomedir
+      - adcli
+      - samba-common-tools
+      - krb5-workstation
+    state: present
+  tags: [packages]
+
+- name: Set hostname variables
+  set_fact:
+    hostname: "{{ ansible_hostname }}"
+    fqdn: "{{ ansible_fqdn }}"
+    computer_dn: "CN={{ ansible_hostname }},{{ ad_ou }}"
+    group_dn: "CN={{ ad_group_name }},{{ ad_ou }}"
+  tags: [setup]
+
+- name: Create temporary Kerberos credential cache file
+  file:
+    path: /tmp/krb5cc_ad_admin
+    state: touch
+    mode: '0600'
+    owner: root
+    group: root
+  tags: [kerberos]
+
+- name: Set KRB5CCNAME environment variable
+  set_fact:
+    krb5ccname: '/tmp/krb5cc_ad_admin'
+  tags: [kerberos]
+
+- name: Get Kerberos ticket for AD admin
+  expect:
+    command: '/usr/bin/kinit {{ ad_admin_user }}@{{ ad_domain | upper }}'
+    responses:
+      (?i)Password: "{{ ad_admin_password }}"
+    environment:
+      KRB5CCNAME: "{{ krb5ccname }}"
+  no_log: true
+  register: kinit_result
+  changed_when: kinit_result.rc == 0
+  tags: [kerberos]
+
+- name: Check if AD group exists
+  shell: >
+    ldapsearch -H ldap://{{ ad_server }} -b "{{ ad_ou }}" 
+    -D "{{ ad_admin_user }}@{{ ad_domain }}" -w "{{ ad_admin_password }}" 
+    "(&(objectClass=group)(cn={{ ad_group_name }}))" cn | grep -c "cn: {{ ad_group_name }}"
+  register: ad_group_exists
+  changed_when: false
+  failed_when: false
+  no_log: true
+  tags: [group]
+
+- name: Create AD group if it doesn't exist
+  block:
+    - name: Create temporary LDIF file for group creation
+      copy:
+        dest: /tmp/create_group.ldif
+        content: |
+          dn: CN={{ ad_group_name }},{{ ad_ou }}
+          objectClass: top
+          objectClass: group
+          cn: {{ ad_group_name }}
+          description: {{ ad_group_desc }}
+          sAMAccountName: {{ ad_group_name }}
+          groupType: -2147483646
+        mode: '0600'
+      when: ad_group_exists.stdout == "0"
+      
+    - name: Add group using ldapadd
+      command: >
+        ldapadd -H ldap://{{ ad_server }} -D "{{ ad_admin_user }}@{{ ad_domain }}" 
+        -w "{{ ad_admin_password }}" -f /tmp/create_group.ldif
+      when: ad_group_exists.stdout == "0"
+      no_log: true
+      register: group_create
+      changed_when: group_create.rc == 0
+      failed_when: group_create.rc != 0 and "Already exists" not in group_create.stderr
+      
+    - name: Remove temporary LDIF file
+      file:
+        path: /tmp/create_group.ldif
+        state: absent
+  environment:
+    KRB5CCNAME: "{{ krb5ccname }}"
+  tags: [group]
+
+- name: Check if computer account exists in AD
+  command: >
+    adcli info --domain={{ ad_domain }} --host={{ ad_server }} 
+    --login-user="{{ ad_admin_user }}" --login-password="{{ ad_admin_password }}" 
+    "{{ hostname }}"
+  register: computer_account_exists
+  changed_when: false
+  failed_when: false
+  no_log: true
+  tags: [computer]
+
+- name: Create computer account in AD
+  command: >
+    adcli create --domain={{ ad_domain }} --host={{ ad_server }} 
+    --login-user="{{ ad_admin_user }}" --login-password="{{ ad_admin_password }}" 
+    --computer-name="{{ hostname }}" --os-name="RHEL" --os-version="8.4"
+    --host-fqdn="{{ fqdn }}" --domain-ou="{{ ad_ou }}"
+  when: computer_account_exists.rc != 0
+  no_log: true
+  register: computer_create
+  changed_when: computer_create.rc == 0
+  tags: [computer]
+
+- name: Create temporary LDIF file for adding computer to group
+  copy:
+    dest: /tmp/add_computer_to_group.ldif
+    content: |
+      dn: {{ group_dn }}
+      changetype: modify
+      add: member
+      member: {{ computer_dn }}
+    mode: '0600'
+  tags: [membership]
+
+- name: Add computer account to AD group
+  command: >
+    ldapmodify -H ldap://{{ ad_server }} -D "{{ ad_admin_user }}@{{ ad_domain }}" 
+    -w "{{ ad_admin_password }}" -f /tmp/add_computer_to_group.ldif
+  environment:
+    KRB5CCNAME: "{{ krb5ccname }}"
+  register: add_to_group
+  changed_when: add_to_group.rc == 0
+  failed_when: add_to_group.rc != 0 and "Already exists" not in add_to_group.stderr
+  no_log: true
+  tags: [membership]
+
+- name: Remove temporary LDIF file for group membership
+  file:
+    path: /tmp/add_computer_to_group.ldif
+    state: absent
+  tags: [cleanup]
+
+- name: Destroy Kerberos ticket
+  command: kdestroy
+  environment:
+    KRB5CCNAME: "{{ krb5ccname }}"
+  changed_when: false
+  tags: [cleanup]
+
+- name: Remove Kerberos credential cache file
+  file:
+    path: "{{ krb5ccname }}"
+    state: absent
+  tags: [cleanup]
+
+- name: AD group management status
+  debug:
+    msg: |
+      Active Directory Group Management Complete:
+      Computer Account: {{ hostname }} {{ 'created' if computer_create.changed else 'already exists' }}
+      AD Group: {{ ad_group_name }} {{ 'created' if group_create is defined and group_create.changed else 'already exists' }}
+      Server added to group: {{ 'Success' if add_to_group.rc == 0 or 'Already exists' in add_to_group.stderr|default('') else 'Failed' }}
+  tags: [status]

@@ -1,0 +1,30 @@
+---
+# Ansible Playbook for RHEL 8.4 Server Configuration in GCP
+# This playbook sets up LDAP authentication, DNS registration, and AD group management
+
+- name: Configure RHEL 8.4 Server in GCP
+  hosts: rhel84_servers
+  become: yes
+  vars_files:
+    - vars/main.yml
+  
+  roles:
+    - role: ldap_auth
+      tags: [ldap, auth]
+    
+    - role: dns_register
+      tags: [dns]
+    
+    - role: ad_group
+      tags: [ad, groups]
+  
+  post_tasks:
+    - name: Summary of configuration
+      debug:
+        msg: |
+          Configuration complete for {{ ansible_hostname }}
+          
+          LDAP Authentication: Configured
+          DNS Registration: Complete ({{ ansible_hostname }}.{{ dns_domain }} -> {{ ansible_default_ipv4.address }})
+          AD Group: Added to {{ ad_group_name }}
+      tags: [always]

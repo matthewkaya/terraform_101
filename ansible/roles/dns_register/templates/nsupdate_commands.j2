@@ -1,0 +1,12 @@
+server {{ dns_server }}
+
+# Remove any existing records for this host
+update delete {{ hostname }}.{{ dns_domain }} A
+update delete {{ reverse_ip }}.in-addr.arpa PTR
+
+# Add new records
+update add {{ hostname }}.{{ dns_domain }} {{ dns_ttl }} A {{ ip_address }}
+update add {{ reverse_ip }}.in-addr.arpa {{ dns_ttl }} PTR {{ hostname }}.{{ dns_domain }}
+
+show
+send

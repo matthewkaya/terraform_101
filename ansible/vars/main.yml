@@ -1,0 +1,24 @@
+---
+# Variables for RHEL 8.4 configuration in GCP
+
+# LDAP Authentication Variables
+ldap_server: "ldap.example.com"
+ldap_base_dn: "dc=example,dc=com"
+ldap_bind_dn: "cn=admin,dc=example,dc=com"
+ldap_bind_password: "secure_password"
+ldap_ssl_port: 636
+
+# DNS Registration Variables
+dns_server: "ns1.example.com"
+dns_domain: "example.com"
+dns_ttl: 3600
+dns_key_file: "/etc/nsupdate.key"
+
+# Active Directory Variables
+ad_server: "ad.example.com"
+ad_domain: "example.com"
+ad_admin_user: "administrator"
+ad_admin_password: "secure_ad_password"
+ad_group_name: "RHEL_Servers"
+ad_group_desc: "RHEL 8.4 Servers in GCP"
+ad_ou: "OU=Servers,OU=GCP,DC=example,DC=com"
